@@ -1,7 +1,19 @@
-use crate::canvas::{Annotations, LineAnnotation, Rectangle, Shape, Vector3TranslationRotation};
+mod frame;
+
+use frame::{FramedVector2, PhysicsFrame};
+
+use crate::canvas::{
+    Annotations, ArcAnnotation, LineAnnotation, Rectangle, Shape, Vector3TranslationRotation,
+};
+use crate::parameters::*;
+use crate::physics::frame::TransformMode;
 use crate::state::ObjectState;
-use nalgebra::{Rotation2, Vector2, Vector3};
+use nalgebra::{Vector2, Vector3};
 use raqote::DrawTarget;
+
+fn shift_moment_of_inertia(moi: f32, m: f32, r: f32) -> f32 {
+    moi + m * r.powf(2.)
+}
 
 pub struct PhysicsObject {
     shape: Box<dyn Shape>,
@@ -9,10 +21,6 @@ pub struct PhysicsObject {
 }
 
 impl PhysicsObject {
-    fn get_cog(&self) -> Vector2<f32> {
-        self.shape.get_cog()
-    }
-
     pub fn rect(width: f32, height: f32, pos: Vector2<f32>) -> Self {
         Self {
             shape: Box::new(Rectangle::new(width, height)),
@@ -20,11 +28,8 @@ impl PhysicsObject {
                 pos: Vector3::new(pos.x, pos.y, 0.),
                 vel: Vector3::zeros(),
                 acc: Vector3::zeros(),
-                mass: 1000000.,
-                rotational_inertia: (1. / 12.)
-                    * width
-                    * height
-                    * (width.powf(2.) + height.powf(2.)),
+                mass: 100.,
+                rotational_inertia: 10.,
             },
         }
     }
@@ -49,64 +54,66 @@ impl PhysicsData {
 pub(crate) fn update_physics(
     objs: &mut PhysicsData,
     delta: &std::time::Duration,
-    cursor_pos: (f32, f32),
+    cursor_pos: Vector2<f32>,
 ) -> Annotations {
     let mut annotations = Annotations::new();
+    const ACCEL_SCALE: f32 = 0.001;
 
     // Only operate on the first object
     let obj = &mut objs.objects[0];
 
     // Important values and when they are from
-    let last_acc = obj.state.acc;
     let last_vel = obj.state.vel;
     let m = obj.state.mass;
-    let i = obj.state.rotational_inertia;
 
-    let rmat = Rotation2::new(last_vel.rotation());
+    let object_frame = PhysicsFrame::from(obj.state.pos);
+    let pivot_pos = FramedVector2::new(object_frame, obj.shape.joint_position());
 
-    // Calculate acceleration at CoG
-    let c1 = rmat * obj.get_cog();
-
-    let lw1 = Rotation2::new(obj.state.vel.z);
-    let la1 = Rotation2::new(obj.state.acc.z);
-    let ac = obj.state.acc.translation() + la1 * c1 + lw1 * (lw1 * c1);
-
-    annotations.add(LineAnnotation::new(obj.state.pos.translation(), ac));
+    // Force at pivot
+    let pivot_pos_global = pivot_pos.to_frame(PhysicsFrame::Global, TransformMode::Point);
+    let f_pull = FramedVector2::new(
+        PhysicsFrame::Global,
+        Vector2::new(
+            (cursor_pos.x - pivot_pos_global.vec().x) * CURSOR_P - obj.state.vel.x * CURSOR_D,
+            (cursor_pos.y - pivot_pos_global.vec().y) * CURSOR_P - obj.state.vel.y * CURSOR_D,
+        ),
+    );
+    // Gravity at CoG
+    let f_g = FramedVector2::new(PhysicsFrame::Global, Vector2::new(0., -9816. * m));
+    // Reaction at pivot
+    let f_r = -f_g;
+    // Net force, global frame
+    let f_net = f_pull + f_g + f_r;
+    let f_net_object = f_net.to_frame(object_frame, TransformMode::Vector);
 
     // Moment of inertia about pivot
-    let ia = i + m * c1.norm_squared();
+    // let ia = shift_moment_of_inertia(obj.shape.moment_of_inertia(m), m, pivot_pos.vec().norm());
+    let ia = obj.shape.moment_of_inertia(m);
 
-    // Pivot torque
-    let ta = -crate::parameters::FRICTION_COEFF * last_vel.rotation();
+    // Inertial fudge force in local frame, applied to CoM
+    let f_i = -f_net_object;
 
-    // Calculate new rotational acceleration
-    let new_racc = (ta + c1.y * m * last_acc.x - c1.x * m * (9.81 + last_acc.y)) / ia;
+    // Pivot friction
+    let t_f = -crate::parameters::FRICTION_COEFF * last_vel.rotation()
+        - crate::parameters::FRICTION_COEFF_QUADRATIC * (last_vel.rotation()).powf(2.);
+    // Gravity in body frame
+    let local_g = f_g.to_frame(object_frame, TransformMode::Vector);
+    // Net torque at pivot
+    let pivot_torque = (-pivot_pos).cross(&(local_g + f_i)) + t_f;
+    let angular_accel = pivot_torque / ia;
 
-    // Generate new rotational state from accel
-    let dt = delta.as_secs_f32();
-    let new_rvel = obj.state.vel.z + new_racc * dt;
-    let new_rpos = obj.state.pos.z + new_rvel * dt;
-
-    // Assuming all prior calculations are correct, they should (approximately) lead to the
-    // joint remaining pinned. Therefore we can derive velocity/acceleration from that.
-    let new_pos = Vector3::new(cursor_pos.0, cursor_pos.1, new_rpos);
-    let pos_delta = new_pos - obj.state.pos;
-    let new_vel = Vector3::new(pos_delta.x / dt, pos_delta.y / dt, new_rvel.clamp(-1., 1.));
-    let vel_delta = new_vel - obj.state.vel;
-    let new_acc = Vector3::new(
-        vel_delta.x / dt,
-        vel_delta.y / dt,
-        new_racc.clamp(-0.1, 0.1),
-    );
-
-    annotations.add(LineAnnotation::new(
+    println!("angular_accel: {}", angular_accel);
+    annotations.add(ArcAnnotation::new(
         obj.state.pos.translation(),
-        new_acc.translation() * 0.0002,
+        15.,
+        obj.state.pos.rotation(),
+        angular_accel * 10.,
     ));
 
+    let new_acc = Vector3::new(f_net.vec().x / m, f_net.vec().y / m, pivot_torque / ia);
     obj.state.acc = new_acc;
     obj.state.vel = obj.state.vel + new_acc * delta.as_secs_f32();
-    obj.state.pos = obj.state.pos + new_vel * delta.as_secs_f32();
+    obj.state.pos = obj.state.pos + obj.state.vel * delta.as_secs_f32();
 
     annotations
 }

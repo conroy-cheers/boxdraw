@@ -15,6 +15,7 @@ mod physics;
 mod state;
 
 use crate::canvas::Annotations;
+use crate::canvas::Vector2Screenspace;
 use crate::parameters::*;
 
 struct WindowData {
@@ -43,12 +44,12 @@ fn draw(
     }
 
     let framerate = std::time::Duration::from_secs(1).div_duration_f32(*delta);
-    let delta_string = format!("{:.2}fps", framerate);
+    let delta_string = format!("{:.0}fps", framerate);
     wd.dt.draw_text(
         &wd.font,
-        36.,
+        16.,
         &delta_string,
-        Point::new(0., 100.),
+        Point::new(1., 20.),
         &Source::Solid(SolidSource::from_unpremultiplied_argb(0xff, 0, 0, 0)),
         &DrawOptions::new(),
     );
@@ -83,17 +84,20 @@ fn main() {
 
     // Redraw the window in a loop as fast as possible
     let mut last_frame_time = std::time::Instant::now();
+    let mut last_cursor_pos = Vector2::new(0., 0.);
+    let mut annotations = Annotations::new();
     while window_data.window.is_open() && !window_data.window.is_key_down(minifb::Key::Escape) {
         // Get time since last frame
         let now = std::time::Instant::now();
         let delta = now.duration_since(last_frame_time);
 
-        // get cursor pos if valid
-        let mut annotations = Annotations::new();
-        if let Some(pos) = window_data.window.get_mouse_pos(MouseMode::Clamp) {
-            annotations = physics::update_physics(&mut physics_data, &delta, pos);
+        // update cursor pos and draw state
+        if let Some(coords) = window_data.window.get_mouse_pos(MouseMode::Clamp) {
+            last_cursor_pos = Vector2::new(coords.0, coords.1).convert_screen();
+            draw(&mut window_data, &physics_data, &annotations, &delta);
         }
-        draw(&mut window_data, &physics_data, &annotations, &delta);
+
+        annotations = physics::update_physics(&mut physics_data, &delta, last_cursor_pos);
 
         last_frame_time = now;
     }

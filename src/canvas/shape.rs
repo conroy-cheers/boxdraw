@@ -4,7 +4,14 @@ use nalgebra::{Rotation2, Vector2};
 use raqote::{DrawOptions, DrawTarget, PathBuilder, SolidSource, Source};
 
 pub trait Shape {
-    fn get_cog(&self) -> Vector2<f32>;
+    /// Vector from CoM to joint, in the body frame.
+    fn joint_position(&self) -> Vector2<f32>;
+
+    /// Moment of inertia about the shape's center of mass.
+    /// Assumes uniform density.
+    fn moment_of_inertia(&self, m: f32) -> f32;
+
+    /// Draw the shape. Rotation is applied around the shape's center of mass.
     fn draw(&self, dt: &mut DrawTarget, state: &ObjectState);
 }
 
@@ -20,8 +27,14 @@ impl Rectangle {
 }
 
 impl Shape for Rectangle {
-    fn get_cog(&self) -> Vector2<f32> {
-        Vector2::new(self.width / 2., self.height / 2.)
+    fn joint_position(&self) -> Vector2<f32> {
+        Vector2::new(-self.width / 2., self.height / 2.)
+    }
+
+    fn moment_of_inertia(&self, m: f32) -> f32 {
+        let b = self.width;
+        let h = self.height;
+        m * (b * h * (b.powf(2.) + h.powf(2.)) / 12.) / 100.
     }
 
     fn draw(&self, dt: &mut DrawTarget, state: &ObjectState) {
@@ -33,10 +46,11 @@ impl Shape for Rectangle {
         let height = rmat * height_vec;
 
         let mut pb = PathBuilder::new();
-        pb.move_to_vec(state.pos.translation());
-        pb.line_to_vec(state.pos.translation() + width);
-        pb.line_to_vec(state.pos.translation() + width + height);
-        pb.line_to_vec(state.pos.translation() + height);
+        let start_pos = state.pos.translation() - width/2. - height/2.;
+        pb.move_to_vec(start_pos);
+        pb.line_to_vec(start_pos + width);
+        pb.line_to_vec(start_pos + width + height);
+        pb.line_to_vec(start_pos + height);
         pb.close();
         let path = pb.finish();
         dt.fill(
